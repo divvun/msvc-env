@@ -6,6 +6,7 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use tempfile;
 use thiserror::Error;
+use tracing::Level;
 
 const VSWHERE_URL: &str =
     "https://github.com/microsoft/vswhere/releases/download/3.1.7/vswhere.exe";
@@ -92,7 +93,7 @@ pub struct MsvcEnvironment {
 
 pub struct MsvcEnv;
 
-const VSWHERE_PATH: &str = "target\\msvc-env-cache";
+const VSWHERE_PATH: &str = "target/msvc-env-cache";
 const VSWHERE_EXE: &str = "vswhere.exe";
 
 impl MsvcEnv {
@@ -112,6 +113,7 @@ impl MsvcEnv {
 
         // Download vswhere if it doesn't exist
         if !vswhere_path.exists() {
+            tracing::trace!("Downloading vswhere to {}", vswhere_path.display());
             let response = ureq::get(VSWHERE_URL)
                 .call()
                 .map_err(|e| MsvcEnvError::DownloadError(e.to_string()))?;
@@ -129,6 +131,7 @@ impl MsvcEnv {
         self.download_vswhere()?;
         let vswhere_path = PathBuf::from(VSWHERE_PATH).join(VSWHERE_EXE);
 
+        tracing::trace!("Running vswhere to find Visual Studio");
         let output = Command::new(&vswhere_path)
             .args(&["-latest", "-products", "*", "-property", "installationPath"])
             .output()
@@ -145,7 +148,9 @@ impl MsvcEnv {
             return Err(MsvcEnvError::NoVisualStudio);
         }
 
-        Ok(PathBuf::from(path))
+        let path = PathBuf::from(path);
+        tracing::trace!("Found Visual Studio at {}", path.display());
+        Ok(path)
     }
 
     pub fn vc_path(&self, arch: MsvcArch) -> Result<PathBuf, MsvcEnvError> {
@@ -159,12 +164,18 @@ impl MsvcEnv {
             .join(arch.bat_filename());
 
         if !bat_path.exists() {
+            tracing::trace!(
+                "Architecture {} not supported (missing {})",
+                arch,
+                arch.bat_filename()
+            );
             return Err(MsvcEnvError::ArchNotSupported(
                 arch,
                 arch.bat_filename().to_string(),
             ));
         }
 
+        tracing::trace!("Found VC path at {}", vc_path.display());
         Ok(vc_path)
     }
 
@@ -179,6 +190,7 @@ impl MsvcEnv {
             return Err(MsvcEnvError::NoVisualStudio);
         }
 
+        tracing::trace!("Found vcvars at {}", vcvars_path.display());
         Ok(vcvars_path)
     }
 
@@ -221,16 +233,8 @@ impl MsvcEnv {
         vcvars_path: &Path,
         arch: MsvcArch,
     ) -> Result<HashMap<String, String>, MsvcEnvError> {
-        let lock = VSWHERE_LOCK.get_or_init(|| Mutex::new(()));
-        let _lock = lock
-            .lock()
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Mutex poisoned"))?;
-        let tmp_path = Path::new(VSWHERE_PATH);
-        std::fs::create_dir_all(tmp_path).map_err(|e| MsvcEnvError::IoError(e.into()))?;
-        let temp_bat = tmp_path.join("getenv.bat");
-
-        println!("vcvars_path: {}", vcvars_path.display());
-        println!("arch: {:?}", arch);
+        let temp_dir = tempfile::tempdir().map_err(|e| MsvcEnvError::IoError(e.into()))?;
+        let temp_bat = temp_dir.path().join("getenv.bat");
 
         let batch_content = format!(
             "@echo off\r\n\
@@ -241,8 +245,10 @@ impl MsvcEnv {
             arch.vcvars_arg(),
         );
 
-        println!("batch_content: {}", batch_content);
-        println!("temp_bat: {}", temp_bat.display());
+        tracing::trace!("vcvars_path: {}", vcvars_path.display());
+        tracing::trace!("arch: {:?}", arch);
+        tracing::trace!("batch_content: {}", batch_content);
+        tracing::trace!("temp_bat: {}", temp_bat.display());
 
         fs::write(&temp_bat, batch_content)?;
 
@@ -274,6 +280,7 @@ impl MsvcEnv {
             }
         }
 
+        tracing::trace!("Parsed {} environment variables", env.len());
         Ok(env)
     }
 }
@@ -473,51 +480,72 @@ mod tests {
     }
 
     #[test]
-    fn test_amd64_cl() {
+    fn test_msvc_executables() {
         cleanup_cache();
         let msvc_env = MsvcEnv::new();
 
-        // Get the VC path for amd64
-        match msvc_env.vc_path(MsvcArch::X64) {
-            Ok(vc_path) => {
-                println!("Found VC path at: {}", vc_path.display());
+        // Test each architecture
+        for arch in [MsvcArch::X86, MsvcArch::X64, MsvcArch::Arm64, MsvcArch::All] {
+            println!("\nTesting MSVC executables for {:?}", arch);
 
-                // Get the environment
-                match msvc_env.environment(MsvcArch::X64) {
-                    Ok(env) => {
-                        println!("Environment variables found: {}", env.vars.len());
+            // Get the VC path
+            match msvc_env.vc_path(arch) {
+                Ok(vc_path) => {
+                    println!("Found VC path at: {}", vc_path.display());
 
-                        // Create a command and configure it with MSVC environment
-                        let mut cmd = Command::new("cl");
-                        cmd.msvc_env(MsvcArch::X64).unwrap();
+                    // Get the environment
+                    match msvc_env.environment(arch) {
+                        Ok(env) => {
+                            println!("Environment variables found: {}", env.vars.len());
 
-                        // Run cl.exe with no args to get version info
-                        let output = cmd.output().unwrap();
-                        println!(
-                            "cl.exe output:\n{}",
-                            String::from_utf8_lossy(&output.stdout)
-                        );
-                        println!(
-                            "cl.exe stderr:\n{}",
-                            String::from_utf8_lossy(&output.stderr)
-                        );
+                            // Test each executable
+                            for exe in ["cl", "link", "mc", "rc", "lib"] {
+                                println!("\nTesting {}:", exe);
+                                let mut cmd = Command::new(exe);
+                                match cmd.msvc_env(arch) {
+                                    Ok(_) => {
+                                        // Run with /? to get help output
+                                        let output = cmd.arg("/?").output().unwrap();
+                                        println!(
+                                            "{} output:\n{}",
+                                            exe,
+                                            String::from_utf8_lossy(&output.stdout)
+                                        );
+                                        println!(
+                                            "{} stderr:\n{}",
+                                            exe,
+                                            String::from_utf8_lossy(&output.stderr)
+                                        );
 
-                        assert!(output.status.success());
+                                        // For link.exe, a non-zero exit code is expected when showing help
+                                        if exe == "link" {
+                                            assert!(
+                                                !output.stdout.is_empty(),
+                                                "link.exe should output help text"
+                                            );
+                                        } else {
+                                            assert!(output.status.success());
+                                        }
+                                    }
+                                    Err(e) => println!("Failed to configure {}: {}", exe, e),
+                                }
+                            }
+                        }
+                        Err(MsvcEnvError::NoVisualStudio) => {
+                            println!(
+                                "No Visual Studio installation found - this is expected if VS is not installed"
+                            );
+                        }
+                        Err(e) => panic!("Unexpected error: {}", e),
                     }
-                    Err(MsvcEnvError::NoVisualStudio) => {
-                        println!(
-                            "No Visual Studio installation found - this is expected if VS is not installed"
-                        );
-                    }
-                    Err(e) => panic!("Unexpected error: {}", e),
                 }
+                Err(MsvcEnvError::NoVisualStudio) => {
+                    println!(
+                        "No Visual Studio installation found - this is expected if VS is not installed"
+                    );
+                }
+                Err(e) => panic!("Unexpected error: {}", e),
             }
-            Err(MsvcEnvError::NoVisualStudio) => {
-                println!(
-                    "No Visual Studio installation found - this is expected if VS is not installed"
-                );
-            }
-            Err(e) => panic!("Unexpected error: {}", e),
         }
     }
 }

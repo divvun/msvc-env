@@ -5,5 +5,8 @@ edition = "2024"
 
 [dependencies]
 ureq = "3.0.11"
-tempfile = "3.10"
 thiserror = "1.0"
+tempfile = "3.10"
+tracing = "0.1"
+
+[dev-dependencies]
