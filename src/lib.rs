@@ -1,9 +1,29 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::fs;
+use std::collections::HashMap;
 use thiserror::Error;
 
 const VSWHERE_URL: &str = "https://github.com/microsoft/vswhere/releases/download/3.1.1/vswhere.exe";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MsvcArch {
+    X86,
+    X64,
+    Arm,
+    Arm64,
+}
+
+impl MsvcArch {
+    fn vcvars_arg(&self) -> &'static str {
+        match self {
+            MsvcArch::X86 => "x86",
+            MsvcArch::X64 => "x64",
+            MsvcArch::Arm => "arm",
+            MsvcArch::Arm64 => "arm64",
+        }
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum MsvcEnvError {
@@ -15,6 +35,17 @@ pub enum MsvcEnvError {
     VswhereError(String),
     #[error("No Visual Studio installation found")]
     NoVisualStudio,
+    #[error("Failed to execute vcvars: {0}")]
+    VcvarsError(String),
+    #[error("Failed to parse vcvars output: {0}")]
+    ParseError(String),
+}
+
+/// Represents the environment variables needed for MSVC
+#[derive(Debug, Clone)]
+pub struct MsvcEnvironment {
+    /// All environment variables from vcvars
+    pub vars: HashMap<String, String>,
 }
 
 pub struct MsvcEnv {
@@ -24,8 +55,8 @@ pub struct MsvcEnv {
 impl MsvcEnv {
     pub fn new() -> Result<Self, MsvcEnvError> {
         // Create a cache directory in target
-        let target_dir = PathBuf::from("target");
-        let cache_dir = target_dir.join("msvc-env-cache");
+        let tardir = PathBuf::from("target");
+        let cache_dir = tardir.join("msvc-env-cache");
         fs::create_dir_all(&cache_dir)?;
 
         let vswhere_path = cache_dir.join("vswhere.exe");
@@ -59,7 +90,7 @@ impl MsvcEnv {
         Ok(PathBuf::from(path))
     }
 
-    pub fn get_vc_path(&self) -> Result<PathBuf, MsvcEnvError> {
+    pub fn vc_path(&self) -> Result<PathBuf, MsvcEnvError> {
         let vs_path = self.find_visual_studio()?;
         let vc_path = vs_path.join("VC");
         
@@ -69,10 +100,72 @@ impl MsvcEnv {
 
         Ok(vc_path)
     }
-}
 
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+    pub fn vcvars_path(&self) -> Result<PathBuf, MsvcEnvError> {
+        let vc_path = self.vc_path()?;
+        let vcvars_path = vc_path.join("Auxiliary").join("Build").join("vcvarsall.bat");
+        
+        if !vcvars_path.exists() {
+            return Err(MsvcEnvError::NoVisualStudio);
+        }
+
+        Ok(vcvars_path)
+    }
+
+    /// Gets the environment variables for the specified architecture by running vcvarsall.bat
+    /// Returns a struct containing all environment variables set by vcvars
+    pub fn environment(&self, arch: MsvcArch) -> Result<MsvcEnvironment, MsvcEnvError> {
+        let vcvars_path = self.vcvars_path()?;
+        
+        // Then get the environment after running vcvars
+        let new_env = self.vcvars_environment(&vcvars_path, arch)?;
+        
+        // Create the final environment with all variables
+        Ok(MsvcEnvironment { vars: new_env })
+    }
+
+    /// Gets the environment variables after running vcvars
+    fn vcvars_environment(&self, vcvars_path: &Path, arch: MsvcArch) -> Result<HashMap<String, String>, MsvcEnvError> {
+        // Create a batch file that will run vcvars and output the environment
+        let temp_dir = tempfile::tempdir().map_err(|e| MsvcEnvError::IoError(e.into()))?;
+        let temp_bat = temp_dir.path().join("getenv.bat");
+        
+        let batch_content = format!(
+            "@echo off\r\n\
+            call \"{}\" {} > nul 2>&1\r\n\
+            if errorlevel 1 exit /b %errorlevel%\r\n\
+            set\r\n",
+            vcvars_path.display(),
+            arch.vcvars_arg(),
+        );
+        
+        fs::write(&temp_bat, batch_content)?;
+
+        let output = Command::new("cmd")
+            .args(&["/C", temp_bat.to_str().unwrap()])
+            .output()
+            .map_err(|e| MsvcEnvError::VcvarsError(e.to_string()))?;
+
+        if !output.status.success() {
+            return Err(MsvcEnvError::VcvarsError(String::from_utf8_lossy(&output.stderr).into_owned()));
+        }
+
+        self.parse_environment_output(&output.stdout)
+    }
+
+    /// Parses the output of the 'set' command into a HashMap
+    fn parse_environment_output(&self, output: &[u8]) -> Result<HashMap<String, String>, MsvcEnvError> {
+        let output_str = String::from_utf8_lossy(output);
+        let mut env = HashMap::new();
+
+        for line in output_str.lines() {
+            if let Some((key, value)) = line.split_once('=') {
+                env.insert(key.to_string(), value.to_string());
+            }
+        }
+
+        Ok(env)
+    }
 }
 
 #[cfg(test)]
@@ -129,16 +222,35 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_get_vc_path() {
+    fn test_vc_path() {
         cleanup_cache();
         let msvc_env = MsvcEnv::new().unwrap();
         
         // This test will only pass if Visual Studio with VC tools is installed
-        match msvc_env.get_vc_path() {
+        match msvc_env.vc_path() {
             Ok(path) => {
                 assert!(path.exists());
                 assert!(path.is_dir());
                 println!("Found VC path at: {}", path.display());
+            }
+            Err(MsvcEnvError::NoVisualStudio) => {
+                println!("No Visual Studio installation found - this is expected if VS is not installed");
+            }
+            Err(e) => panic!("Unexpected error: {}", e),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_environment() {
+        cleanup_cache();
+        let msvc_env = MsvcEnv::new().unwrap();
+        
+        // This test will only pass if Visual Studio with VC tools is installed
+        match msvc_env.environment(MsvcArch::X64) {
+            Ok(env) => {
+                // Print some important variables for debugging
+                println!("Environment variables found: {}", env.vars.len());
             }
             Err(MsvcEnvError::NoVisualStudio) => {
                 println!("No Visual Studio installation found - this is expected if VS is not installed");
