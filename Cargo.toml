@@ -1,12 +1,9 @@
 [package]
 name = "msvc-env"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
-reqwest = { version = "0.11", features = ["blocking"] }
-tempfile = "3.8"
+ureq = "3.0.11"
+tempfile = "3.10"
 thiserror = "1.0"
-
-[dev-dependencies]
-serial_test = "2.0"
