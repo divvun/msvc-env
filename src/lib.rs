@@ -12,6 +12,7 @@ const VSWHERE_URL: &str =
     "https://github.com/microsoft/vswhere/releases/download/3.1.7/vswhere.exe";
 
 static VSWHERE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static ENV_CACHE: OnceLock<Mutex<HashMap<MsvcArch, MsvcEnvironment>>> = OnceLock::new();
 
 /// Extension trait for Command to add MSVC environment variables
 pub trait CommandExt {
@@ -22,14 +23,17 @@ pub trait CommandExt {
 impl CommandExt for Command {
     fn msvc_env(&mut self, arch: MsvcArch) -> Result<&mut Command, MsvcEnvError> {
         let msvc_env = MsvcEnv::new();
+        println!("Getting environment for {:?}", arch);
         let env = msvc_env.environment(arch)?;
+        println!("Environment: {:?}", env);
 
         self.envs(&env.vars);
+        println!("Environment set");
         Ok(self)
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MsvcArch {
     X86,
     X64,
@@ -218,13 +222,26 @@ impl MsvcEnv {
     /// Gets the environment variables for the specified architecture by running vcvarsall.bat
     /// Returns a struct containing all environment variables set by vcvars
     pub fn environment(&self, arch: MsvcArch) -> Result<MsvcEnvironment, MsvcEnvError> {
+        // Get or initialize the cache
+        let cache = ENV_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut cache = cache.lock().unwrap();
+
+        // Check if we have a cached environment for this architecture
+        if let Some(env) = cache.get(&arch) {
+            tracing::trace!("Using cached environment for {:?}", arch);
+            return Ok(env.clone());
+        }
+
+        tracing::trace!("Not cached, getting environment");
+        // If not cached, get the environment
         let vcvars_path = self.vcvars_path(arch)?;
-
-        // Then get the environment after running vcvars
         let new_env = self.vcvars_environment(&vcvars_path, arch)?;
+        let env = MsvcEnvironment { vars: new_env };
 
-        // Create the final environment with all variables
-        Ok(MsvcEnvironment { vars: new_env })
+        // Cache the environment
+        cache.insert(arch, env.clone());
+
+        Ok(env)
     }
 
     /// Gets the environment variables after running vcvars
