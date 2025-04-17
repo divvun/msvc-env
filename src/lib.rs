@@ -6,6 +6,22 @@ use thiserror::Error;
 
 const VSWHERE_URL: &str = "https://github.com/microsoft/vswhere/releases/download/3.1.1/vswhere.exe";
 
+/// Extension trait for Command to add MSVC environment variables
+pub trait CommandExt {
+    /// Configures the command to use the MSVC environment for the specified architecture
+    fn msvc_env(&mut self, arch: MsvcArch) -> Result<&mut Command, MsvcEnvError>;
+}
+
+impl CommandExt for Command {
+    fn msvc_env(&mut self, arch: MsvcArch) -> Result<&mut Command, MsvcEnvError> {
+        let msvc_env = MsvcEnv::new();
+        let env = msvc_env.environment(arch)?;
+    
+        self.envs(&env.vars);
+        Ok(self)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MsvcArch {
     X86,
@@ -48,18 +64,20 @@ pub struct MsvcEnvironment {
     pub vars: HashMap<String, String>,
 }
 
-pub struct MsvcEnv {
-    vswhere_path: PathBuf,
-}
+pub struct MsvcEnv;
+
+const VSWHERE_PATH: &str = "target/msvc-env-cache";
+const VSWHERE_EXE: &str = "vswhere.exe";
 
 impl MsvcEnv {
-    pub fn new() -> Result<Self, MsvcEnvError> {
-        // Create a cache directory in target
-        let tardir = PathBuf::from("target");
-        let cache_dir = tardir.join("msvc-env-cache");
-        fs::create_dir_all(&cache_dir)?;
+    pub fn new() -> Self {
+        Self
+    }
 
-        let vswhere_path = cache_dir.join("vswhere.exe");
+    fn download_vswhere(&self) -> Result<(), MsvcEnvError> {
+        fs::create_dir_all(VSWHERE_PATH)?;        
+
+        let vswhere_path = PathBuf::from(VSWHERE_PATH).join(VSWHERE_EXE);
         
         // Download vswhere if it doesn't exist
         if !vswhere_path.exists() {
@@ -69,12 +87,22 @@ impl MsvcEnv {
             std::io::copy(&mut content.as_ref(), &mut file)?;
         }
 
-        Ok(Self { vswhere_path })
+        Ok(())
     }
 
-    pub fn find_visual_studio(&self) -> Result<PathBuf, MsvcEnvError> {
-        let output = Command::new(&self.vswhere_path)
-            .args(&["-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"])
+    pub fn find_visual_studio(&self, arch: MsvcArch) -> Result<PathBuf, MsvcEnvError> {
+        self.download_vswhere()?;
+        let vswhere_path = PathBuf::from(VSWHERE_PATH).join(VSWHERE_EXE);
+
+        let component = match arch {
+            MsvcArch::X86 => "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            MsvcArch::X64 => "Microsoft.VisualStudio.Component.VC.Tools.x64.x86",
+            MsvcArch::Arm => "Microsoft.VisualStudio.Component.VC.Tools.ARM",
+            MsvcArch::Arm64 => "Microsoft.VisualStudio.Component.VC.Tools.ARM64",
+        };
+
+        let output = Command::new(&vswhere_path)
+            .args(&["-latest", "-products", "*", "-requires", component, "-property", "installationPath"])
             .output()
             .map_err(|e| MsvcEnvError::VswhereError(e.to_string()))?;
 
@@ -90,8 +118,8 @@ impl MsvcEnv {
         Ok(PathBuf::from(path))
     }
 
-    pub fn vc_path(&self) -> Result<PathBuf, MsvcEnvError> {
-        let vs_path = self.find_visual_studio()?;
+    pub fn vc_path(&self, arch: MsvcArch) -> Result<PathBuf, MsvcEnvError> {
+        let vs_path = self.find_visual_studio(arch)?;
         let vc_path = vs_path.join("VC");
         
         if !vc_path.exists() {
@@ -101,8 +129,8 @@ impl MsvcEnv {
         Ok(vc_path)
     }
 
-    pub fn vcvars_path(&self) -> Result<PathBuf, MsvcEnvError> {
-        let vc_path = self.vc_path()?;
+    pub fn vcvars_path(&self, arch: MsvcArch) -> Result<PathBuf, MsvcEnvError> {
+        let vc_path = self.vc_path(arch)?;
         let vcvars_path = vc_path.join("Auxiliary").join("Build").join("vcvarsall.bat");
         
         if !vcvars_path.exists() {
@@ -115,7 +143,7 @@ impl MsvcEnv {
     /// Gets the environment variables for the specified architecture by running vcvarsall.bat
     /// Returns a struct containing all environment variables set by vcvars
     pub fn environment(&self, arch: MsvcArch) -> Result<MsvcEnvironment, MsvcEnvError> {
-        let vcvars_path = self.vcvars_path()?;
+        let vcvars_path = self.vcvars_path(arch)?;
         
         // Then get the environment after running vcvars
         let new_env = self.vcvars_environment(&vcvars_path, arch)?;
@@ -193,21 +221,19 @@ mod tests {
         cleanup_cache();
 
         // Create new instance which should download vswhere
-        let msvc_env = MsvcEnv::new().unwrap();
+        let msvc_env = MsvcEnv::new();
         
-        // Verify vswhere was downloaded
-        assert!(msvc_env.vswhere_path.exists());
-        assert!(msvc_env.vswhere_path.is_file());
+        msvc_env.download_vswhere().unwrap();
     }
 
     #[test]
     #[serial]
     fn test_find_visual_studio() {
         cleanup_cache();
-        let msvc_env = MsvcEnv::new().unwrap();
+        let msvc_env = MsvcEnv::new();
         
         // This test will only pass if Visual Studio is installed
-        match msvc_env.find_visual_studio() {
+        match msvc_env.find_visual_studio(MsvcArch::X64) {
             Ok(path) => {
                 assert!(path.exists());
                 assert!(path.is_dir());
@@ -224,10 +250,10 @@ mod tests {
     #[serial]
     fn test_vc_path() {
         cleanup_cache();
-        let msvc_env = MsvcEnv::new().unwrap();
+        let msvc_env = MsvcEnv::new();
         
         // This test will only pass if Visual Studio with VC tools is installed
-        match msvc_env.vc_path() {
+        match msvc_env.vc_path(MsvcArch::X64) {
             Ok(path) => {
                 assert!(path.exists());
                 assert!(path.is_dir());
@@ -244,13 +270,30 @@ mod tests {
     #[serial]
     fn test_environment() {
         cleanup_cache();
-        let msvc_env = MsvcEnv::new().unwrap();
+        let msvc_env = MsvcEnv::new();
         
         // This test will only pass if Visual Studio with VC tools is installed
         match msvc_env.environment(MsvcArch::X64) {
             Ok(env) => {
-                // Print some important variables for debugging
                 println!("Environment variables found: {}", env.vars.len());
+            }
+            Err(MsvcEnvError::NoVisualStudio) => {
+                println!("No Visual Studio installation found - this is expected if VS is not installed");
+            }
+            Err(e) => panic!("Unexpected error: {}", e),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_command_ext() {
+        cleanup_cache();
+        
+        // Create a command and configure it with MSVC environment
+        let mut cmd = Command::new("cl");
+        match cmd.msvc_env(MsvcArch::X64) {
+            Ok(_) => {
+                println!("Successfully configured command with MSVC environment");
             }
             Err(MsvcEnvError::NoVisualStudio) => {
                 println!("No Visual Studio installation found - this is expected if VS is not installed");
