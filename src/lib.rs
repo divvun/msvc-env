@@ -222,7 +222,6 @@ mod tests {
 
         // Create new instance which should download vswhere
         let msvc_env = MsvcEnv::new();
-        
         msvc_env.download_vswhere().unwrap();
     }
 
@@ -232,17 +231,20 @@ mod tests {
         cleanup_cache();
         let msvc_env = MsvcEnv::new();
         
-        // This test will only pass if Visual Studio is installed
-        match msvc_env.find_visual_studio(MsvcArch::X64) {
-            Ok(path) => {
-                assert!(path.exists());
-                assert!(path.is_dir());
-                println!("Found Visual Studio at: {}", path.display());
+        // Test each architecture
+        for arch in [MsvcArch::X86, MsvcArch::X64, MsvcArch::Arm, MsvcArch::Arm64] {
+            println!("Testing Visual Studio detection for {:?}", arch);
+            match msvc_env.find_visual_studio(arch) {
+                Ok(path) => {
+                    assert!(path.exists());
+                    assert!(path.is_dir());
+                    println!("Found Visual Studio at: {}", path.display());
+                }
+                Err(MsvcEnvError::NoVisualStudio) => {
+                    println!("No Visual Studio installation found for {:?} - this is expected if VS is not installed", arch);
+                }
+                Err(e) => panic!("Unexpected error for {:?}: {}", arch, e),
             }
-            Err(MsvcEnvError::NoVisualStudio) => {
-                println!("No Visual Studio installation found - this is expected if VS is not installed");
-            }
-            Err(e) => panic!("Unexpected error: {}", e),
         }
     }
 
@@ -252,17 +254,20 @@ mod tests {
         cleanup_cache();
         let msvc_env = MsvcEnv::new();
         
-        // This test will only pass if Visual Studio with VC tools is installed
-        match msvc_env.vc_path(MsvcArch::X64) {
-            Ok(path) => {
-                assert!(path.exists());
-                assert!(path.is_dir());
-                println!("Found VC path at: {}", path.display());
+        // Test each architecture
+        for arch in [MsvcArch::X86, MsvcArch::X64, MsvcArch::Arm, MsvcArch::Arm64] {
+            println!("Testing VC path detection for {:?}", arch);
+            match msvc_env.vc_path(arch) {
+                Ok(path) => {
+                    assert!(path.exists());
+                    assert!(path.is_dir());
+                    println!("Found VC path at: {}", path.display());
+                }
+                Err(MsvcEnvError::NoVisualStudio) => {
+                    println!("No Visual Studio installation found for {:?} - this is expected if VS is not installed", arch);
+                }
+                Err(e) => panic!("Unexpected error for {:?}: {}", arch, e),
             }
-            Err(MsvcEnvError::NoVisualStudio) => {
-                println!("No Visual Studio installation found - this is expected if VS is not installed");
-            }
-            Err(e) => panic!("Unexpected error: {}", e),
         }
     }
 
@@ -272,15 +277,24 @@ mod tests {
         cleanup_cache();
         let msvc_env = MsvcEnv::new();
         
-        // This test will only pass if Visual Studio with VC tools is installed
-        match msvc_env.environment(MsvcArch::X64) {
-            Ok(env) => {
-                println!("Environment variables found: {}", env.vars.len());
+        // Test each architecture
+        for arch in [MsvcArch::X86, MsvcArch::X64, MsvcArch::Arm, MsvcArch::Arm64] {
+            println!("Testing environment setup for {:?}", arch);
+            match msvc_env.environment(arch) {
+                Ok(env) => {
+                    println!("Environment variables found: {}", env.vars.len());
+                    // Print some key variables for debugging
+                    for key in ["PATH", "INCLUDE", "LIB", "Platform", "VSCMD_ARG_TGT_ARCH"].iter() {
+                        if let Some(value) = env.vars.get(*key) {
+                            println!("{} = {}", key, value);
+                        }
+                    }
+                }
+                Err(MsvcEnvError::NoVisualStudio) => {
+                    println!("No Visual Studio installation found for {:?} - this is expected if VS is not installed", arch);
+                }
+                Err(e) => panic!("Unexpected error for {:?}: {}", arch, e),
             }
-            Err(MsvcEnvError::NoVisualStudio) => {
-                println!("No Visual Studio installation found - this is expected if VS is not installed");
-            }
-            Err(e) => panic!("Unexpected error: {}", e),
         }
     }
 
@@ -289,16 +303,20 @@ mod tests {
     fn test_command_ext() {
         cleanup_cache();
         
-        // Create a command and configure it with MSVC environment
-        let mut cmd = Command::new("cl");
-        match cmd.msvc_env(MsvcArch::X64) {
-            Ok(_) => {
-                println!("Successfully configured command with MSVC environment");
+        // Test each architecture
+        for arch in [MsvcArch::X86, MsvcArch::X64, MsvcArch::Arm, MsvcArch::Arm64] {
+            println!("Testing CommandExt for {:?}", arch);
+            // Create a command and configure it with MSVC environment
+            let mut cmd = Command::new("cl");
+            match cmd.msvc_env(arch) {
+                Ok(_) => {
+                    println!("Successfully configured command with MSVC environment for {:?}", arch);
+                }
+                Err(MsvcEnvError::NoVisualStudio) => {
+                    println!("No Visual Studio installation found for {:?} - this is expected if VS is not installed", arch);
+                }
+                Err(e) => panic!("Unexpected error for {:?}: {}", arch, e),
             }
-            Err(MsvcEnvError::NoVisualStudio) => {
-                println!("No Visual Studio installation found - this is expected if VS is not installed");
-            }
-            Err(e) => panic!("Unexpected error: {}", e),
         }
     }
 }
