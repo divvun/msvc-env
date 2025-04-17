@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::os::windows::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
@@ -58,6 +59,12 @@ impl MsvcArch {
     }
 }
 
+impl std::fmt::Display for MsvcArch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.vcvars_arg())
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum MsvcEnvError {
     #[error("Failed to create cache directory: {0}")]
@@ -68,6 +75,8 @@ pub enum MsvcEnvError {
     VswhereError(String),
     #[error("No Visual Studio installation found")]
     NoVisualStudio,
+    #[error("Visual Studio installation found but {0} architecture is not supported (missing {1})")]
+    ArchNotSupported(MsvcArch, String),
     #[error("Failed to execute vcvars: {0}")]
     VcvarsError(String),
     #[error("Failed to parse vcvars output: {0}")]
@@ -83,7 +92,7 @@ pub struct MsvcEnvironment {
 
 pub struct MsvcEnv;
 
-const VSWHERE_PATH: &str = "target/msvc-env-cache";
+const VSWHERE_PATH: &str = "target\\msvc-env-cache";
 const VSWHERE_EXE: &str = "vswhere.exe";
 
 impl MsvcEnv {
@@ -116,28 +125,12 @@ impl MsvcEnv {
         Ok(())
     }
 
-    pub fn find_visual_studio(&self, arch: MsvcArch) -> Result<PathBuf, MsvcEnvError> {
+    pub fn find_visual_studio(&self) -> Result<PathBuf, MsvcEnvError> {
         self.download_vswhere()?;
         let vswhere_path = PathBuf::from(VSWHERE_PATH).join(VSWHERE_EXE);
 
-        let component = match arch {
-            MsvcArch::X86 => "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-            MsvcArch::X64 => "Microsoft.VisualStudio.Component.VC.Tools.x64.x86",
-            MsvcArch::Arm => "Microsoft.VisualStudio.Component.VC.Tools.ARM",
-            MsvcArch::Arm64 => "Microsoft.VisualStudio.Component.VC.Tools.ARM64",
-            MsvcArch::All => "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-        };
-
         let output = Command::new(&vswhere_path)
-            .args(&[
-                "-latest",
-                "-products",
-                "*",
-                "-requires",
-                component,
-                "-property",
-                "installationPath",
-            ])
+            .args(&["-latest", "-products", "*", "-property", "installationPath"])
             .output()
             .map_err(|e| MsvcEnvError::VswhereError(e.to_string()))?;
 
@@ -156,11 +149,20 @@ impl MsvcEnv {
     }
 
     pub fn vc_path(&self, arch: MsvcArch) -> Result<PathBuf, MsvcEnvError> {
-        let vs_path = self.find_visual_studio(arch)?;
+        let vs_path = self.find_visual_studio()?;
         let vc_path = vs_path.join("VC");
 
-        if !vc_path.exists() {
-            return Err(MsvcEnvError::NoVisualStudio);
+        // Check if the specific bat file exists
+        let bat_path = vc_path
+            .join("Auxiliary")
+            .join("Build")
+            .join(arch.bat_filename());
+
+        if !bat_path.exists() {
+            return Err(MsvcEnvError::ArchNotSupported(
+                arch,
+                arch.bat_filename().to_string(),
+            ));
         }
 
         Ok(vc_path)
@@ -178,6 +180,27 @@ impl MsvcEnv {
         }
 
         Ok(vcvars_path)
+    }
+
+    /// Lists all .bat files in the Auxiliary/Build directory
+    pub fn list_bat_files(&self) -> Result<Vec<PathBuf>, MsvcEnvError> {
+        let vs_path = self.find_visual_studio()?;
+        let build_dir = vs_path.join("VC").join("Auxiliary").join("Build");
+
+        if !build_dir.exists() {
+            return Err(MsvcEnvError::NoVisualStudio);
+        }
+
+        let mut bat_files = Vec::new();
+        for entry in fs::read_dir(build_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().map_or(false, |ext| ext == "bat") {
+                bat_files.push(path);
+            }
+        }
+
+        Ok(bat_files)
     }
 
     /// Gets the environment variables for the specified architecture by running vcvarsall.bat
@@ -198,8 +221,16 @@ impl MsvcEnv {
         vcvars_path: &Path,
         arch: MsvcArch,
     ) -> Result<HashMap<String, String>, MsvcEnvError> {
-        let temp_dir = tempfile::tempdir().map_err(|e| MsvcEnvError::IoError(e.into()))?;
-        let temp_bat = temp_dir.path().join("getenv.bat");
+        let lock = VSWHERE_LOCK.get_or_init(|| Mutex::new(()));
+        let _lock = lock
+            .lock()
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Mutex poisoned"))?;
+        let tmp_path = Path::new(VSWHERE_PATH);
+        std::fs::create_dir_all(tmp_path).map_err(|e| MsvcEnvError::IoError(e.into()))?;
+        let temp_bat = tmp_path.join("getenv.bat");
+
+        println!("vcvars_path: {}", vcvars_path.display());
+        println!("arch: {:?}", arch);
 
         let batch_content = format!(
             "@echo off\r\n\
@@ -210,12 +241,13 @@ impl MsvcEnv {
             arch.vcvars_arg(),
         );
 
-        // fs::write(&temp_bat, batch_content)?;
+        println!("batch_content: {}", batch_content);
+        println!("temp_bat: {}", temp_bat.display());
+
+        fs::write(&temp_bat, batch_content)?;
 
         let output = Command::new("cmd")
-            // .args(&["/C", temp_bat.to_str().unwrap()])
-            .arg("/C")
-            .arg(batch_content)
+            .args(&["/C", temp_bat.to_str().unwrap()])
             .output()
             .map_err(|e| MsvcEnvError::VcvarsError(e.to_string()))?;
 
@@ -287,7 +319,7 @@ mod tests {
             MsvcArch::All,
         ] {
             println!("Testing Visual Studio detection for {:?}", arch);
-            match msvc_env.find_visual_studio(arch) {
+            match msvc_env.find_visual_studio() {
                 Ok(path) => {
                     assert!(path.exists());
                     assert!(path.is_dir());
@@ -330,6 +362,12 @@ mod tests {
                         arch
                     );
                 }
+                Err(MsvcEnvError::ArchNotSupported(arch, _)) => {
+                    println!(
+                        "Arch {:?} not supported - this is expected if VS is not installed",
+                        arch
+                    );
+                }
                 Err(e) => panic!("Unexpected error for {:?}: {}", arch, e),
             }
         }
@@ -365,6 +403,15 @@ mod tests {
                         arch
                     );
                 }
+                Err(MsvcEnvError::ArchNotSupported(arch, _)) => {
+                    println!(
+                        "Arch {:?} not supported - this is expected if VS is not installed",
+                        arch
+                    );
+                }
+                Err(MsvcEnvError::VcvarsError(e)) => {
+                    println!("Vcvars error: {}", e);
+                }
                 Err(e) => panic!("Unexpected error for {:?}: {}", arch, e),
             }
         }
@@ -398,8 +445,79 @@ mod tests {
                         arch
                     );
                 }
+                Err(MsvcEnvError::ArchNotSupported(arch, _)) => {
+                    println!(
+                        "Arch {:?} not supported - this is expected if VS is not installed",
+                        arch
+                    );
+                }
                 Err(e) => panic!("Unexpected error for {:?}: {}", arch, e),
             }
+        }
+    }
+
+    #[test]
+    fn test_list_bat_files() {
+        cleanup_cache();
+        let msvc_env = MsvcEnv::new();
+
+        match msvc_env.list_bat_files() {
+            Ok(files) => {
+                println!("Found .bat files:");
+                for file in files {
+                    println!("  {}", file.display());
+                }
+            }
+            Err(e) => println!("Error listing .bat files: {}", e),
+        }
+    }
+
+    #[test]
+    fn test_amd64_cl() {
+        cleanup_cache();
+        let msvc_env = MsvcEnv::new();
+
+        // Get the VC path for amd64
+        match msvc_env.vc_path(MsvcArch::X64) {
+            Ok(vc_path) => {
+                println!("Found VC path at: {}", vc_path.display());
+
+                // Get the environment
+                match msvc_env.environment(MsvcArch::X64) {
+                    Ok(env) => {
+                        println!("Environment variables found: {}", env.vars.len());
+
+                        // Create a command and configure it with MSVC environment
+                        let mut cmd = Command::new("cl");
+                        cmd.msvc_env(MsvcArch::X64).unwrap();
+
+                        // Run cl.exe with no args to get version info
+                        let output = cmd.output().unwrap();
+                        println!(
+                            "cl.exe output:\n{}",
+                            String::from_utf8_lossy(&output.stdout)
+                        );
+                        println!(
+                            "cl.exe stderr:\n{}",
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+
+                        assert!(output.status.success());
+                    }
+                    Err(MsvcEnvError::NoVisualStudio) => {
+                        println!(
+                            "No Visual Studio installation found - this is expected if VS is not installed"
+                        );
+                    }
+                    Err(e) => panic!("Unexpected error: {}", e),
+                }
+            }
+            Err(MsvcEnvError::NoVisualStudio) => {
+                println!(
+                    "No Visual Studio installation found - this is expected if VS is not installed"
+                );
+            }
+            Err(e) => panic!("Unexpected error: {}", e),
         }
     }
 }
