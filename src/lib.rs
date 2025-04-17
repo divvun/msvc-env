@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
+use tempfile;
 use thiserror::Error;
 
 const VSWHERE_URL: &str =
@@ -32,6 +33,7 @@ pub enum MsvcArch {
     X64,
     Arm,
     Arm64,
+    All,
 }
 
 impl MsvcArch {
@@ -41,6 +43,17 @@ impl MsvcArch {
             MsvcArch::X64 => "x64",
             MsvcArch::Arm => "arm",
             MsvcArch::Arm64 => "arm64",
+            MsvcArch::All => "all",
+        }
+    }
+
+    fn bat_filename(&self) -> &'static str {
+        match self {
+            MsvcArch::X64 => "vcvars64.bat",
+            MsvcArch::Arm => "vcvarsamd64_arm.bat",
+            MsvcArch::Arm64 => "vcvarsamd64_arm64.bat",
+            MsvcArch::X86 => "vcvarsamd64_x86.bat",
+            MsvcArch::All => "vcvarsall.bat",
         }
     }
 }
@@ -112,6 +125,7 @@ impl MsvcEnv {
             MsvcArch::X64 => "Microsoft.VisualStudio.Component.VC.Tools.x64.x86",
             MsvcArch::Arm => "Microsoft.VisualStudio.Component.VC.Tools.ARM",
             MsvcArch::Arm64 => "Microsoft.VisualStudio.Component.VC.Tools.ARM64",
+            MsvcArch::All => "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
         };
 
         let output = Command::new(&vswhere_path)
@@ -157,7 +171,7 @@ impl MsvcEnv {
         let vcvars_path = vc_path
             .join("Auxiliary")
             .join("Build")
-            .join("vcvarsall.bat");
+            .join(arch.bat_filename());
 
         if !vcvars_path.exists() {
             return Err(MsvcEnvError::NoVisualStudio);
@@ -184,23 +198,24 @@ impl MsvcEnv {
         vcvars_path: &Path,
         arch: MsvcArch,
     ) -> Result<HashMap<String, String>, MsvcEnvError> {
-        // Create a batch file that will run vcvars and output the environment
         let temp_dir = tempfile::tempdir().map_err(|e| MsvcEnvError::IoError(e.into()))?;
         let temp_bat = temp_dir.path().join("getenv.bat");
 
         let batch_content = format!(
             "@echo off\r\n\
-            call \"{}\" {} > nul 2>&1\r\n\
+            call \"{}\" {}\r\n\
             if errorlevel 1 exit /b %errorlevel%\r\n\
             set\r\n",
             vcvars_path.display(),
             arch.vcvars_arg(),
         );
 
-        fs::write(&temp_bat, batch_content)?;
+        // fs::write(&temp_bat, batch_content)?;
 
         let output = Command::new("cmd")
-            .args(&["/C", temp_bat.to_str().unwrap()])
+            // .args(&["/C", temp_bat.to_str().unwrap()])
+            .arg("/C")
+            .arg(batch_content)
             .output()
             .map_err(|e| MsvcEnvError::VcvarsError(e.to_string()))?;
 
@@ -264,7 +279,13 @@ mod tests {
         let msvc_env = MsvcEnv::new();
 
         // Test each architecture
-        for arch in [MsvcArch::X86, MsvcArch::X64, MsvcArch::Arm, MsvcArch::Arm64] {
+        for arch in [
+            MsvcArch::X86,
+            MsvcArch::X64,
+            MsvcArch::Arm,
+            MsvcArch::Arm64,
+            MsvcArch::All,
+        ] {
             println!("Testing Visual Studio detection for {:?}", arch);
             match msvc_env.find_visual_studio(arch) {
                 Ok(path) => {
@@ -289,7 +310,13 @@ mod tests {
         let msvc_env = MsvcEnv::new();
 
         // Test each architecture
-        for arch in [MsvcArch::X86, MsvcArch::X64, MsvcArch::Arm, MsvcArch::Arm64] {
+        for arch in [
+            MsvcArch::X86,
+            MsvcArch::X64,
+            MsvcArch::Arm,
+            MsvcArch::Arm64,
+            MsvcArch::All,
+        ] {
             println!("Testing VC path detection for {:?}", arch);
             match msvc_env.vc_path(arch) {
                 Ok(path) => {
@@ -314,7 +341,13 @@ mod tests {
         let msvc_env = MsvcEnv::new();
 
         // Test each architecture
-        for arch in [MsvcArch::X86, MsvcArch::X64, MsvcArch::Arm, MsvcArch::Arm64] {
+        for arch in [
+            MsvcArch::X86,
+            MsvcArch::X64,
+            MsvcArch::Arm,
+            MsvcArch::Arm64,
+            MsvcArch::All,
+        ] {
             println!("Testing environment setup for {:?}", arch);
             match msvc_env.environment(arch) {
                 Ok(env) => {
@@ -342,7 +375,13 @@ mod tests {
         cleanup_cache();
 
         // Test each architecture
-        for arch in [MsvcArch::X86, MsvcArch::X64, MsvcArch::Arm, MsvcArch::Arm64] {
+        for arch in [
+            MsvcArch::X86,
+            MsvcArch::X64,
+            MsvcArch::Arm,
+            MsvcArch::Arm64,
+            MsvcArch::All,
+        ] {
             println!("Testing CommandExt for {:?}", arch);
             // Create a command and configure it with MSVC environment
             let mut cmd = Command::new("cl");
