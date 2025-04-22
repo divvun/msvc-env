@@ -105,6 +105,25 @@ impl MsvcEnv {
         Self
     }
 
+    /// Checks if the environment for a given architecture is valid
+    /// Returns true if the environment can be successfully set up and the MSVC tools are actually available
+    pub fn is_valid_environment(&self, arch: MsvcArch) -> bool {
+        // Try to get the environment
+        let _env = match self.environment(arch) {
+            Ok(env) => env,
+            Err(_) => return false,
+        };
+
+        // Try to run a simple MSVC command to verify the environment
+        let mut cmd = Command::new("cl");
+        cmd.msvc_env(arch).ok();
+        // Run with /? to get help output - this is a simple command that should work if cl is available
+        match cmd.arg("/?").output() {
+            Ok(output) => output.status.success(),
+            Err(_) => false,
+        }
+    }
+
     fn download_vswhere(&self) -> Result<(), MsvcEnvError> {
         let lock = VSWHERE_LOCK.get_or_init(|| Mutex::new(()));
         let _lock = lock
