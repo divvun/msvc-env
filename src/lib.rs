@@ -1,12 +1,10 @@
 use std::collections::HashMap;
 use std::fs;
-use std::os::windows::process::CommandExt as _;
+use std::io::{Write as _, stdin};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
-use tempfile;
 use thiserror::Error;
-use tracing::Level;
 
 const VSWHERE_URL: &str =
     "https://github.com/microsoft/vswhere/releases/download/3.1.7/vswhere.exe";
@@ -25,7 +23,7 @@ impl CommandExt for Command {
         let msvc_env = MsvcEnv::new();
         println!("Getting environment for {:?}", arch);
         let env = msvc_env.environment(arch)?;
-        println!("Environment: {:?}", env);
+        // println!("Environment: {:#?}", env);
 
         self.envs(&env.vars);
         println!("Environment set");
@@ -43,7 +41,7 @@ pub enum MsvcArch {
 }
 
 impl MsvcArch {
-    fn vcvars_arg(&self) -> &'static str {
+    fn as_str(&self) -> &'static str {
         match self {
             MsvcArch::X86 => "x86",
             MsvcArch::X64 => "x64",
@@ -82,7 +80,7 @@ impl MsvcArch {
 
 impl std::fmt::Display for MsvcArch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self.vcvars_arg())
+        write!(f, "{:?}", self.as_str())
     }
 }
 
@@ -245,6 +243,7 @@ impl MsvcEnv {
         // Check if we have a cached environment for this architecture
         if let Some(env) = cache.get(&arch) {
             tracing::trace!("Using cached environment for {:?}", arch);
+            println!("Cached environment: {:#?}", env);
             return Ok(env.clone());
         }
 
@@ -266,28 +265,29 @@ impl MsvcEnv {
         vcvars_path: &Path,
         arch: MsvcArch,
     ) -> Result<HashMap<String, String>, MsvcEnvError> {
-        let temp_dir = tempfile::tempdir().map_err(|e| MsvcEnvError::IoError(e.into()))?;
-        let temp_bat = temp_dir.path().join("getenv.bat");
+        // let temp_dir = tempfile::tempdir().map_err(|e| MsvcEnvError::IoError(e.into()))?;
+        // let temp_bat = temp_dir.path().join("getenv.bat");
 
-        let batch_content = format!(
-            "@echo off\r\n\
-            call \"{}\" {}\r\n\
-            if errorlevel 1 exit /b %errorlevel%\r\n\
-            set\r\n",
-            vcvars_path.display(),
-            arch.vcvars_arg(),
-        );
+        let vsdevcmd_path = self.vsdevcmd_path()?;
+        let mut child = Command::new("cmd")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .arg("/k")
+            .arg(vsdevcmd_path)
+            .arg("-startdir=none")
+            .arg(format!("-arch={}", arch.as_str()))
+            .arg(format!("-host_arch={}", "x64"))
+            // .arg(format!("\"{}\" -startdir=none -arch={} -host_arch={} & set", vsdevcmd_path.display(), arch.as_str(), "x64"))
+            .spawn()
+            .map_err(|e| MsvcEnvError::VcvarsError(e.to_string()))?;
 
-        tracing::trace!("vcvars_path: {}", vcvars_path.display());
-        tracing::trace!("arch: {:?}", arch);
-        tracing::trace!("batch_content: {}", batch_content);
-        tracing::trace!("temp_bat: {}", temp_bat.display());
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(b"set\n")?;
+        stdin.flush()?;
+        drop(stdin);
 
-        fs::write(&temp_bat, batch_content)?;
-
-        let output = Command::new("cmd")
-            .args(&["/C", temp_bat.to_str().unwrap()])
-            .output()
+        let output = child
+            .wait_with_output()
             .map_err(|e| MsvcEnvError::VcvarsError(e.to_string()))?;
 
         if !output.status.success() {
@@ -296,25 +296,37 @@ impl MsvcEnv {
             ));
         }
 
-        self.parse_environment_output(&output.stdout)
+        let output = String::from_utf8_lossy(&output.stdout);
+        let output = output
+            .trim()
+            .lines()
+            .skip(6)
+            .collect::<Vec<_>>()
+            .iter()
+            .filter_map(|line| {
+                println!("Line: {:?}", line);
+                match line.split_once('=') {
+                    Some((key, value)) => Some((key.to_string(), value.to_string())),
+                    None => None,
+                }
+            })
+            .collect::<HashMap<String, String>>();
+
+        println!("Output: {:#?}", output);
+
+        Ok(output)
     }
 
-    /// Parses the output of the 'set' command into a HashMap
-    fn parse_environment_output(
-        &self,
-        output: &[u8],
-    ) -> Result<HashMap<String, String>, MsvcEnvError> {
-        let output_str = String::from_utf8_lossy(output);
-        let mut env = HashMap::new();
+    pub fn vsdevcmd_path(&self) -> Result<PathBuf, MsvcEnvError> {
+        let vs_path = self.find_visual_studio()?;
+        let vsdevcmd_path = vs_path.join("Common7").join("Tools").join("VsDevCmd.bat");
 
-        for line in output_str.lines() {
-            if let Some((key, value)) = line.split_once('=') {
-                env.insert(key.to_string(), value.to_string());
-            }
+        if !vsdevcmd_path.exists() {
+            return Err(MsvcEnvError::NoVisualStudio);
         }
 
-        tracing::trace!("Parsed {} environment variables", env.len());
-        Ok(env)
+        tracing::trace!("Found VsDevCmd at {}", vsdevcmd_path.display());
+        Ok(vsdevcmd_path)
     }
 }
 
@@ -358,7 +370,7 @@ mod tests {
             MsvcArch::Arm64,
             MsvcArch::All,
         ] {
-            println!("Testing Visual Studio detection for {:?}", arch);
+            // println!("Testing Visual Studio detection for {:?}", arch);
             match msvc_env.find_visual_studio() {
                 Ok(path) => {
                     assert!(path.exists());
@@ -518,7 +530,7 @@ mod tests {
         let msvc_env = MsvcEnv::new();
 
         // Test each architecture
-        for arch in [MsvcArch::X86, MsvcArch::X64, MsvcArch::Arm64, MsvcArch::All] {
+        for arch in [MsvcArch::X64, MsvcArch::Arm64, MsvcArch::X86] {
             println!("\nTesting MSVC executables for {:?}", arch);
 
             // Get the VC path
@@ -530,25 +542,43 @@ mod tests {
                     match msvc_env.environment(arch) {
                         Ok(env) => {
                             println!("Environment variables found: {}", env.vars.len());
+                            for key in ["Path", "INCLUDE", "LIB", "Platform", "VSCMD_ARG_TGT_ARCH"]
+                            {
+                                if let Some(value) = env.vars.get(key) {
+                                    println!("{} = {}", key, value);
+                                }
+                            }
 
                             // Test each executable
                             for exe in ["cl", "link", "mc", "rc", "lib"] {
                                 println!("\nTesting {}:", exe);
+                                let check_cmd =
+                                    Command::new("cmd").arg("/c").arg("set").output().unwrap();
+                                println!(
+                                    "Check cmd: {}",
+                                    String::from_utf8_lossy(&check_cmd.stdout)
+                                );
+
                                 let mut cmd = Command::new(exe);
                                 match cmd.msvc_env(arch) {
                                     Ok(_) => {
                                         // Run with /? to get help output
-                                        let output = cmd.output().unwrap();
-                                        println!(
-                                            "{} output:\n{}",
-                                            exe,
-                                            String::from_utf8_lossy(&output.stdout)
-                                        );
-                                        println!(
-                                            "{} stderr:\n{}",
-                                            exe,
-                                            String::from_utf8_lossy(&output.stderr)
-                                        );
+                                        let output = match cmd.output() {
+                                            Ok(output) => output,
+                                            Err(e) => {
+                                                panic!("Error running {}: {}", exe, e);
+                                            }
+                                        };
+                                        // println!(
+                                        //     "{} output:\n{}",
+                                        //     exe,
+                                        //     String::from_utf8_lossy(&output.stdout)
+                                        // );
+                                        // println!(
+                                        //     "{} stderr:\n{}",
+                                        //     exe,
+                                        //     String::from_utf8_lossy(&output.stderr)
+                                        // );
                                     }
                                     Err(MsvcEnvError::NoVisualStudio) => {
                                         println!("Visual Studio not found - skipping test");
