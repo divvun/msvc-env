@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
-use std::io::{Write as _, stdin};
-use std::path::{Path, PathBuf};
+use std::io::Write as _;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use thiserror::Error;
@@ -21,12 +21,8 @@ pub trait CommandExt {
 impl CommandExt for Command {
     fn msvc_env(&mut self, arch: MsvcArch) -> Result<&mut Command, MsvcEnvError> {
         let msvc_env = MsvcEnv::new();
-        println!("Getting environment for {:?}", arch);
         let env = msvc_env.environment(arch)?;
-        // println!("Environment: {:#?}", env);
-
         self.envs(&env.vars);
-        println!("Environment set");
         Ok(self)
     }
 }
@@ -243,14 +239,11 @@ impl MsvcEnv {
         // Check if we have a cached environment for this architecture
         if let Some(env) = cache.get(&arch) {
             tracing::trace!("Using cached environment for {:?}", arch);
-            println!("Cached environment: {:#?}", env);
             return Ok(env.clone());
         }
 
         tracing::trace!("Not cached, getting environment");
-        // If not cached, get the environment
-        let vcvars_path = self.vcvars_path(arch)?;
-        let new_env = self.vcvars_environment(&vcvars_path, arch)?;
+        let new_env = self.vcvars_environment(arch)?;
         let env = MsvcEnvironment { vars: new_env };
 
         // Cache the environment
@@ -260,14 +253,7 @@ impl MsvcEnv {
     }
 
     /// Gets the environment variables after running vcvars
-    fn vcvars_environment(
-        &self,
-        vcvars_path: &Path,
-        arch: MsvcArch,
-    ) -> Result<HashMap<String, String>, MsvcEnvError> {
-        // let temp_dir = tempfile::tempdir().map_err(|e| MsvcEnvError::IoError(e.into()))?;
-        // let temp_bat = temp_dir.path().join("getenv.bat");
-
+    fn vcvars_environment(&self, arch: MsvcArch) -> Result<HashMap<String, String>, MsvcEnvError> {
         let vsdevcmd_path = self.vsdevcmd_path()?;
         let mut child = Command::new("cmd")
             .stdin(Stdio::piped())
@@ -277,7 +263,6 @@ impl MsvcEnv {
             .arg("-startdir=none")
             .arg(format!("-arch={}", arch.as_str()))
             .arg(format!("-host_arch={}", "x64"))
-            // .arg(format!("\"{}\" -startdir=none -arch={} -host_arch={} & set", vsdevcmd_path.display(), arch.as_str(), "x64"))
             .spawn()
             .map_err(|e| MsvcEnvError::VcvarsError(e.to_string()))?;
 
@@ -303,16 +288,11 @@ impl MsvcEnv {
             .skip(6)
             .collect::<Vec<_>>()
             .iter()
-            .filter_map(|line| {
-                println!("Line: {:?}", line);
-                match line.split_once('=') {
-                    Some((key, value)) => Some((key.to_string(), value.to_string())),
-                    None => None,
-                }
+            .filter_map(|line| match line.split_once('=') {
+                Some((key, value)) => Some((key.to_string(), value.to_string())),
+                None => None,
             })
             .collect::<HashMap<String, String>>();
-
-        println!("Output: {:#?}", output);
 
         Ok(output)
     }
@@ -562,23 +542,12 @@ mod tests {
                                 let mut cmd = Command::new(exe);
                                 match cmd.msvc_env(arch) {
                                     Ok(_) => {
-                                        // Run with /? to get help output
-                                        let output = match cmd.output() {
-                                            Ok(output) => output,
+                                        match cmd.output() {
+                                            Ok(output) => {}
                                             Err(e) => {
                                                 panic!("Error running {}: {}", exe, e);
                                             }
                                         };
-                                        // println!(
-                                        //     "{} output:\n{}",
-                                        //     exe,
-                                        //     String::from_utf8_lossy(&output.stdout)
-                                        // );
-                                        // println!(
-                                        //     "{} stderr:\n{}",
-                                        //     exe,
-                                        //     String::from_utf8_lossy(&output.stderr)
-                                        // );
                                     }
                                     Err(MsvcEnvError::NoVisualStudio) => {
                                         println!("Visual Studio not found - skipping test");
