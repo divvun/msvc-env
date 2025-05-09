@@ -5,17 +5,25 @@ use std::{
 };
 
 fn unixify_path(path: &Path) -> String {
-    let p = path.components()
-        .filter_map(|c| Some(match c {
-            std::path::Component::Prefix(prefix_component) => match prefix_component.kind() {
-                Prefix::Disk(os_str) => format!("/{}", os_str as char).to_lowercase(),
-                _ => format!("{}", prefix_component.as_os_str().to_str().unwrap()),
-            },
-            std::path::Component::RootDir => return None,
-            std::path::Component::CurDir => ".".to_string(),
-            std::path::Component::ParentDir => "..".to_string(),
-            std::path::Component::Normal(os_str) => os_str.to_str().unwrap().replace(" ", "\\ "),
-        }))
+    let p = path
+        .components()
+        .filter_map(|c| {
+            Some(match c {
+                std::path::Component::Prefix(prefix_component) => match prefix_component.kind() {
+                    Prefix::Disk(os_str) => format!("/{}", os_str as char).to_lowercase(),
+                    _ => format!("{}", prefix_component.as_os_str().to_str().unwrap()),
+                },
+                std::path::Component::RootDir => return None,
+                std::path::Component::CurDir => ".".to_string(),
+                std::path::Component::ParentDir => "..".to_string(),
+                std::path::Component::Normal(os_str) => os_str
+                    .to_str()
+                    .unwrap()
+                    .replace(" ", "\\ ")
+                    .replace('(', "\\(")
+                    .replace(')', "\\)"),
+            })
+        })
         .collect::<Vec<_>>();
     // eprintln!("P: {:?}", p);
     p.join("/")

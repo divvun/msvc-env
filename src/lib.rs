@@ -1,10 +1,10 @@
+use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
-use indexmap::IndexMap;
 use thiserror::Error;
 
 const VSWHERE_URL: &str =
