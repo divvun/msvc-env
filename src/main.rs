@@ -80,9 +80,8 @@ fn main() {
             );
         } else if !(key.contains("(") || key.contains(")")) {
             if key.to_uppercase() == "PATH" {
-                println!("export MSVC_PATH={:?}", unixify_path_env(&value));
                 println!("export OLD_PATH=\"$PATH\"");
-                println!("export PATH=\"$MSVC_PATH:$OLD_PATH\"");
+                println!("export PATH={:?}", unixify_path_env(&value));
             } else {
                 println!("export {}={:?}", key, value);
             }
