@@ -9,5 +9,6 @@ thiserror = "1.0"
 tempfile = "3.10"
 tracing = "0.1"
 tracing-subscriber = "0.3.19"
+indexmap = "2.9.0"
 
 [dev-dependencies]

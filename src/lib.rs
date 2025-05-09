@@ -4,6 +4,7 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
+use indexmap::IndexMap;
 use thiserror::Error;
 
 const VSWHERE_URL: &str =
@@ -102,7 +103,7 @@ pub enum MsvcEnvError {
 #[derive(Debug, Clone)]
 pub struct MsvcEnvironment {
     /// All environment variables from vcvars
-    pub vars: HashMap<String, String>,
+    pub vars: IndexMap<String, String>,
 }
 
 pub struct MsvcEnv;
@@ -253,7 +254,7 @@ impl MsvcEnv {
     }
 
     /// Gets the environment variables after running vcvars
-    fn vcvars_environment(&self, arch: MsvcArch) -> Result<HashMap<String, String>, MsvcEnvError> {
+    fn vcvars_environment(&self, arch: MsvcArch) -> Result<IndexMap<String, String>, MsvcEnvError> {
         let vsdevcmd_path = self.vsdevcmd_path()?;
         let mut child = Command::new("cmd")
             .stdin(Stdio::piped())
@@ -292,7 +293,7 @@ impl MsvcEnv {
                 Some((key, value)) => Some((key.to_string(), value.to_string())),
                 None => None,
             })
-            .collect::<HashMap<String, String>>();
+            .collect::<IndexMap<String, String>>();
 
         Ok(output)
     }

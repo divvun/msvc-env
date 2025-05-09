@@ -1,5 +1,33 @@
 use msvc_env::MsvcEnv;
-use std::env;
+use std::{
+    env,
+    path::{Path, Prefix},
+};
+
+fn unixify_path(path: &Path) -> String {
+    let p = path.components()
+        .filter_map(|c| Some(match c {
+            std::path::Component::Prefix(prefix_component) => match prefix_component.kind() {
+                Prefix::Disk(os_str) => format!("/{}", os_str as char).to_lowercase(),
+                _ => format!("{}", prefix_component.as_os_str().to_str().unwrap()),
+            },
+            std::path::Component::RootDir => return None,
+            std::path::Component::CurDir => ".".to_string(),
+            std::path::Component::ParentDir => "..".to_string(),
+            std::path::Component::Normal(os_str) => os_str.to_str().unwrap().replace(" ", "\\ "),
+        }))
+        .collect::<Vec<_>>();
+    // eprintln!("P: {:?}", p);
+    p.join("/")
+}
+
+fn unixify_path_env(path: &str) -> String {
+    path.split(";")
+        .map(|p| Path::new(p))
+        .map(unixify_path)
+        .collect::<Vec<_>>()
+        .join(":")
+}
 
 fn main() {
     tracing_subscriber::fmt::init();
@@ -51,7 +79,13 @@ fn main() {
                 format!("{:?}", value).replace(r"\\", r"\")
             );
         } else if !(key.contains("(") || key.contains(")")) {
-            println!("export {:?}={:?}", key, value);
+            if key.to_uppercase() == "PATH" {
+                println!("export MSVC_PATH={:?}", unixify_path_env(&value));
+                println!("export OLD_PATH=\"$PATH\"");
+                println!("export PATH=\"$MSVC_PATH:$OLD_PATH\"");
+            } else {
+                println!("export {}={:?}", key, value);
+            }
         }
     }
 }
