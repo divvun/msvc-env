@@ -84,7 +84,7 @@ fn main() {
             println!(
                 "${{env:{}}}={}",
                 key,
-                format!("{:?}", value).replace(r"\\", r"\")
+                format!("'{}'", value).replace(r"\\", r"\")
             );
         } else if !(key.contains("(") || key.contains(")")) {
             if key.to_uppercase() == "PATH" {
